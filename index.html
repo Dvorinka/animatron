@@ -1,0 +1,370 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Animatron</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="icon" href="data:,">
+<style>
+  :root {
+    --bg: #101014; --panel: #17171d; --line: #26262e;
+    --fg: #e6e6ea; --dim: #8a8a94; --acc: #d9b45b;
+  }
+  * { box-sizing: border-box; margin: 0; }
+  body {
+    background: var(--bg); color: var(--fg); height: 100vh;
+    font: 14px/1.4 "Segoe UI", system-ui, sans-serif;
+    display: grid; grid-template-rows: auto 1fr; overflow: hidden;
+  }
+  header {
+    display: flex; align-items: center; gap: 16px; padding: 10px 16px;
+    border-bottom: 1px solid var(--line);
+  }
+  header h1 { font-size: 15px; font-weight: 600; letter-spacing: .12em;
+              text-transform: uppercase; }
+  header input {
+    background: var(--panel); border: 1px solid var(--line); color: var(--fg);
+    padding: 6px 10px; border-radius: 6px; width: 240px; outline: none;
+  }
+  header input:focus { border-color: var(--acc); }
+  main { display: grid; grid-template-columns: 260px 1fr; min-height: 0; }
+
+  /* character list */
+  #chars { overflow-y: auto; border-right: 1px solid var(--line); }
+  #chars button {
+    display: block; width: 100%; text-align: left; padding: 9px 16px;
+    background: none; border: 0; border-bottom: 1px solid var(--line);
+    color: var(--fg); cursor: pointer; font: inherit;
+  }
+  #chars button:hover { background: var(--panel); }
+  #chars button.on { background: var(--panel); color: var(--acc);
+                     border-left: 3px solid var(--acc); padding-left: 13px; }
+  #chars .n { float: right; color: var(--dim); font-size: 12px; }
+
+  /* stage */
+  #stage { display: grid; grid-template-rows: auto 1fr auto auto; min-height: 0; }
+  #clips { display: flex; flex-wrap: wrap; gap: 6px; padding: 10px 14px;
+           border-bottom: 1px solid var(--line); }
+  #clips button {
+    background: var(--panel); border: 1px solid var(--line); color: var(--fg);
+    padding: 5px 12px; border-radius: 999px; cursor: pointer; font: inherit;
+    font-size: 13px;
+  }
+  #clips button.on { border-color: var(--acc); color: var(--acc); }
+  #view { position: relative; min-height: 0; }
+  canvas#cv { position: absolute; inset: 0; width: 100%; height: 100%;
+              image-rendering: pixelated; }
+  #view.checker canvas#cv {
+    background:
+      repeating-conic-gradient(#1c1c22 0 25%, #141419 0 50%) 0 0/24px 24px;
+  }
+
+  /* transport */
+  #transport { display: flex; align-items: center; gap: 14px;
+               padding: 10px 16px; border-top: 1px solid var(--line); }
+  #transport button, #transport select {
+    background: var(--panel); border: 1px solid var(--line); color: var(--fg);
+    padding: 5px 12px; border-radius: 6px; cursor: pointer; font: inherit;
+  }
+  #transport button:hover { border-color: var(--acc); }
+  #transport label { color: var(--dim); font-size: 12px; display: flex;
+                     align-items: center; gap: 6px; }
+  #transport input[type=range] { accent-color: var(--acc); }
+  #frameNo { font-variant-numeric: tabular-nums; color: var(--dim);
+             min-width: 90px; }
+
+  /* filmstrip */
+  #strip { display: flex; gap: 6px; padding: 8px 14px; overflow-x: auto;
+           border-top: 1px solid var(--line); }
+  #strip canvas { border: 1px solid var(--line); border-radius: 4px;
+                  cursor: pointer; image-rendering: pixelated; flex: none; }
+  #strip canvas.on { border-color: var(--acc); }
+  #empty { position: absolute; inset: 0; display: grid; place-items: center;
+           color: var(--dim); }
+</style>
+</head>
+<body>
+<header>
+  <h1>Animatron</h1>
+  <input id="search" type="search" placeholder="Filter characters..." autofocus>
+  <button id="openDir" title="open a folder of sprite sheets">open folder</button>
+  <input id="dirPick" type="file" webkitdirectory multiple hidden>
+  <span id="count" style="color:var(--dim);font-size:12px"></span>
+</header>
+<main>
+  <nav id="chars"></nav>
+  <section id="stage">
+    <div id="clips"></div>
+    <div id="view" class="checker">
+      <canvas id="cv"></canvas>
+      <div id="empty">drop a folder of sprite sheets,<br>or click "open folder"</div>
+    </div>
+    <div id="transport">
+      <button id="play">&#9654;</button>
+      <label>fps <input id="fps" type="range" min="1" max="30" value="8">
+        <b id="fpsV">8</b></label>
+      <label>zoom <input id="zoom" type="range" min="1" max="8" value="3">
+        <b id="zoomV">3&times;</b></label>
+      <select id="mode">
+        <option value="loop">loop</option>
+        <option value="once">once</option>
+        <option value="pingpong">ping-pong</option>
+      </select>
+      <button id="bg" title="toggle background">bg</button>
+      <span id="frameNo"></span>
+    </div>
+    <div id="strip"></div>
+  </section>
+</main>
+<script src="slicer.js"></script>
+<script src="sprites.js"></script>
+<script>
+"use strict";
+const $ = id => document.getElementById(id);
+const state = { char: null, clip: null, imgs: null, frame: 0, playing: false,
+                dir: 1, t: 0, data: window.SPRITES || { characters: [] } };
+const imgCache = new Map();
+
+// frame[0] may be a path string (manifest) or a canvas (in-browser slicing)
+const imW = im => im.naturalWidth || im.width;
+const imH = im => im.naturalHeight || im.height;
+const imReady = im => im.tagName === "CANVAS" || (im.complete && im.naturalWidth);
+
+function loadImage(src) {
+  if (typeof src !== "string") return src;
+  if (!imgCache.has(src)) {
+    const im = new Image();
+    im.src = src;
+    imgCache.set(src, im);
+  }
+  return imgCache.get(src);
+}
+
+/* ---------- character list ---------- */
+function renderChars(filter = "") {
+  const nav = $("chars"); nav.textContent = "";
+  const list = state.data.characters.filter(c =>
+    c.name.toLowerCase().includes(filter.toLowerCase()));
+  for (const c of list) {
+    const b = document.createElement("button");
+    b.textContent = c.name;
+    const n = document.createElement("span");
+    n.className = "n";
+    n.textContent = c.clips.length;
+    b.appendChild(n);
+    if (state.char === c) b.classList.add("on");
+    b.onclick = () => selectChar(c);
+    nav.appendChild(b);
+  }
+  $("count").textContent = `${list.length} characters`;
+}
+$("search").oninput = e => renderChars(e.target.value);
+
+/* ---------- clips ---------- */
+function selectChar(c) {
+  state.char = c; state.clip = null;
+  renderChars($("search").value);
+  const box = $("clips"); box.textContent = "";
+  for (const cl of c.clips) {
+    const b = document.createElement("button");
+    b.textContent = `${cl.name} (${cl.frames.length})`;
+    b.onclick = () => selectClip(cl, b);
+    box.appendChild(b);
+    if (!state.clip) selectClip(cl, b);
+  }
+}
+function selectClip(cl, btn) {
+  state.clip = cl; state.frame = 0; state.dir = 1; state.playing = true;
+  $("play").innerHTML = "&#10073;&#10073;";
+  document.querySelectorAll("#clips button").forEach(b => b.classList.remove("on"));
+  btn.classList.add("on");
+  $("empty").style.display = "none";
+  state.imgs = cl.frames.map(f => loadImage(f[0]));
+  // worst-case frame extents (relative to the anchor) -> zoom that always
+  // fits the whole frame on canvas, so heads/weapons are never clipped
+  state.fit = 0;
+  const measure = () => {
+    let up = 0, dn = 0, rad = 0;
+    cl.frames.forEach((f, i) => {
+      const im = state.imgs[i];
+      if (!imW(im)) return;
+      up = Math.max(up, f[2]);
+      dn = Math.max(dn, imH(im) - f[2]);
+      rad = Math.max(rad, f[1], imW(im) - f[1]);
+    });
+    if (up > 0)
+      state.fit = Math.min((cv.height * 0.85 - 6) / up,
+                           (cv.height * 0.15 - 6) / Math.max(dn, 1),
+                           (cv.width * 0.5 - 6) / Math.max(rad, 1))
+                  / (devicePixelRatio || 1);
+  };
+  measure();
+  state.imgs.forEach(im => im.addEventListener("load", measure));
+  buildStrip();
+  draw();
+}
+
+/* ---------- filmstrip ---------- */
+function buildStrip() {
+  const strip = $("strip"); strip.textContent = "";
+  for (const [i, f] of state.clip.frames.entries()) {
+    const im = state.imgs[i];
+    const c = document.createElement("canvas");
+    c.title = `frame ${i + 1}`;
+    c.onclick = () => { state.frame = i; draw(); };
+    const paint = () => {
+      const s = Math.min(64 / imW(im), 64 / imH(im), 1);
+      c.width = Math.max(1, imW(im) * s);
+      c.height = Math.max(1, imH(im) * s);
+      c.getContext("2d").drawImage(im, 0, 0, c.width, c.height);
+    };
+    if (imReady(im)) paint();
+    else im.addEventListener("load", paint);
+    strip.appendChild(c);
+  }
+}
+
+/* ---------- render ---------- */
+const cv = $("cv"), ctx = cv.getContext("2d");
+function fit() {
+  const r = cv.parentElement.getBoundingClientRect();
+  const dpr = devicePixelRatio || 1;
+  cv.width = r.width * dpr; cv.height = r.height * dpr;
+  draw();
+}
+addEventListener("resize", fit);
+
+function draw() {
+  const { clip, imgs, frame } = state;
+  ctx.clearRect(0, 0, cv.width, cv.height);
+  if (!clip || !imgs) return;
+  const img = imgs[frame];
+  if (!imReady(img)) {
+    img.addEventListener("load", draw, { once: true });
+    return;
+  }
+  const [, ax, ay] = clip.frames[frame];
+  const z = +$("zoom").value;
+  const k = (state.fit ? Math.min(z, state.fit) : z) * (devicePixelRatio || 1);
+  ctx.imageSmoothingEnabled = false;
+  // pin the frame's anchor (feet of the body) to a fixed screen point -
+  // the character stands in place, effects move around it
+  const dx = cv.width / 2 - ax * k;
+  const dy = cv.height * 0.85 - ay * k;
+  ctx.drawImage(img, dx, dy, imW(img) * k, imH(img) * k);
+  $("frameNo").textContent = `frame ${frame + 1}/${clip.frames.length}`;
+  document.querySelectorAll("#strip canvas").forEach((c, i) =>
+    c.classList.toggle("on", i === frame));
+}
+
+/* ---------- transport ---------- */
+let last = 0, acc = 0;
+function tick(t) {
+  requestAnimationFrame(tick);
+  if (!state.playing || !state.clip) { last = t; return; }
+  const dt = t - last; last = t; acc += dt;
+  const step = 1000 / +$("fps").value;
+  while (acc >= step) {
+    acc -= step;
+    const n = state.clip.frames.length;
+    const mode = $("mode").value;
+    if (mode === "pingpong") {
+      state.frame += state.dir;
+      if (state.frame >= n - 1 || state.frame <= 0) state.dir *= -1;
+      state.frame = Math.max(0, Math.min(n - 1, state.frame));
+    } else {
+      state.frame++;
+      if (state.frame >= n) {
+        if (mode === "once") { state.frame = n - 1; setPlay(false); }
+        else state.frame = 0;
+      }
+    }
+  }
+  draw();
+}
+requestAnimationFrame(tick);
+
+function setPlay(p) {
+  state.playing = p;
+  $("play").innerHTML = p ? "&#10073;&#10073;" : "&#9654;";
+}
+$("play").onclick = () => setPlay(!state.playing);
+$("fps").oninput = e => $("fpsV").textContent = e.target.value;
+$("zoom").oninput = e => { $("zoomV").textContent = e.target.value + "×"; draw(); };
+$("bg").onclick = () => $("view").classList.toggle("checker");
+
+addEventListener("keydown", e => {
+  if (e.target.tagName === "INPUT" && e.target.type === "search") return;
+  if (!state.clip) return;
+  const n = state.clip.frames.length;
+  if (e.key === " ") { e.preventDefault(); setPlay(!state.playing); }
+  else if (e.key === "ArrowRight") { state.frame = (state.frame + 1) % n; draw(); }
+  else if (e.key === "ArrowLeft") { state.frame = (state.frame - 1 + n) % n; draw(); }
+});
+
+/* ---------- folder loading (in-browser slicing) ---------- */
+async function loadFiles(fileList) {
+  const files = [...fileList].filter(f =>
+    /\.png$/i.test(f.name) && !/frames[/\\]/i.test(f.webkitRelativePath || ""));
+  if (!files.length) return;
+  files.sort((a, b) => a.name.localeCompare(b.name, undefined,
+                                         { numeric: true }));
+  const chars = {};
+  for (const f of files) {
+    $("count").textContent = `slicing ${f.name}...`;
+    await new Promise(r => setTimeout(r));      // let the status paint
+    const bmp = await createImageBitmap(f);
+    const cnv = document.createElement("canvas");
+    cnv.width = bmp.width; cnv.height = bmp.height;
+    const g = cnv.getContext("2d", { willReadFrequently: true });
+    g.drawImage(bmp, 0, 0);
+    const d = g.getImageData(0, 0, cnv.width, cnv.height);
+    const clips = slSliceSheet(d.data, cnv.width, cnv.height);
+    const [name, label] = slParseName(f.name.replace(/\.png$/i, ""));
+    const ch = chars[name] = chars[name] || { name, clips: [] };
+    clips.forEach((fs, i) => ch.clips.push({
+      name: clips.length > 1 ? `${label} · r${i + 1}` : label,
+      frames: fs,
+    }));
+  }
+  state.data = { characters: Object.values(chars)
+                   .sort((a, b) => a.name.localeCompare(b.name)) };
+  state.char = null; state.clip = null;
+  renderChars($("search").value);
+  if (state.data.characters.length) selectChar(state.data.characters[0]);
+  $("empty").style.display = "none";
+}
+
+$("openDir").onclick = () => $("dirPick").click();
+$("dirPick").onchange = e => loadFiles(e.target.files);
+
+// drag & drop (folders traversed via entries when available)
+async function collectFiles(dt) {
+  const out = [];
+  const walk = entry => new Promise(res => {
+    if (entry.isFile) entry.file(f => { out.push(f); res(); });
+    else entry.createReader().readEntries(es =>
+      Promise.all(es.map(walk)).then(res));
+  });
+  const items = [...dt.items].filter(i => i.kind === "file");
+  const entries = items.map(i => i.webkitGetAsEntry && i.webkitGetAsEntry());
+  if (entries.length && entries.every(e => e)) {
+    await Promise.all(entries.map(walk));
+  } else {
+    out.push(...dt.files);
+  }
+  return out;
+}
+addEventListener("dragover", e => e.preventDefault());
+addEventListener("drop", async e => {
+  e.preventDefault();
+  loadFiles(await collectFiles(e.dataTransfer));
+});
+
+/* ---------- boot ---------- */
+renderChars();
+fit();
+if (state.data.characters.length) selectChar(state.data.characters[0]);
+</script>
+</body>
+</html>
