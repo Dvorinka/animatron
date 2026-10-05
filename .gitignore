@@ -1,0 +1,5 @@
+.venv/
+.playwright-mcp/
+__pycache__/
+frames/
+drive-download-*/
